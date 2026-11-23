@@ -1,0 +1,596 @@
+{
+  "name": "Hub 1 - Schedule approved posts",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "4383c629-2f53-4381-8f9c-fa80fccf2c99",
+      "name": "Every minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "0b20996f-3711-43a6-9040-bf2017f09248",
+              "name": "contentDbId",
+              "value": "PASTE_CONTENT_DATABASE_ID",
+              "type": "string"
+            },
+            {
+              "id": "58419370-f2ca-416c-94a0-0f655eec887d",
+              "name": "logDbId",
+              "value": "PASTE_RUN_LOG_DATABASE_ID",
+              "type": "string"
+            },
+            {
+              "id": "c0804344-b9f2-44de-9c8a-f2b688350cf3",
+              "name": "slackWebhook",
+              "value": "PASTE_SLACK_WEBHOOK_URL",
+              "type": "string"
+            },
+            {
+              "id": "38b425df-40f1-4576-a6a9-8085ebff20bf",
+              "name": "bufferOrgId",
+              "value": "6b03ef2b66a95b31f0fb3b4c",
+              "type": "string"
+            },
+            {
+              "id": "bcfd30ef-9a73-4f7f-94a4-7f872087118f",
+              "name": "xChannelId",
+              "value": "6b03efb88541f09ecb729f59",
+              "type": "string"
+            },
+            {
+              "id": "dbedb046-831a-4717-93ed-567cc868af9d",
+              "name": "blueskyChannelId",
+              "value": "6b03ef848541f09ecb729e25",
+              "type": "string"
+            },
+            {
+              "id": "3ddb91a9-bc00-4db1-bbf3-6253f4067510",
+              "name": "allowedApprovers",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "c92dd9dc-11f2-4861-b45e-74b627894dab",
+              "name": "timezoneOffset",
+              "value": "+05:30",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "72a86896-3533-4f67-be0a-ab95247b29e7",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.notion.com/v1/databases/{{ $('Config').first().json.contentDbId }}/query",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filter: { property: 'Status', select: { equals: 'Approved' } }, page_size: 20 }) }}",
+        "options": {}
+      },
+      "id": "af43d763-8cc1-4c06-a01d-98eddd1cf640",
+      "name": "Find approved posts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Hub 1 - check every approved post BEFORE anything is scheduled\nconst cfg = $('Config').first().json;\nconst CHANNELS = { 'X': cfg.xChannelId, 'Bluesky': cfg.blueskyChannelId };\nconst LIMITS = { 'X': 280, 'Bluesky': 300 };\nconst allowed = String(cfg.allowedApprovers || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);\nconst runId = 'run-' + $execution.id;\nconst txt = (p) => ((p && (p.rich_text || p.title)) || []).map(t => t.plain_text).join('');\nconst out = [];\n\nconst rows = ($input.first().json.results) || [];\nfor (const page of rows) {\n  const pr = page.properties || {};\n  const approvers = ((pr['Approved by'] || {}).people || []);\n  const approverLabel = approvers.map(a => a.name || (a.person && a.person.email) || 'someone').join(', ');\n  const base = { pageId: page.id, url: page.url, title: txt(pr['Title']) || '(untitled)', runId, approver: approverLabel };\n  const reject = (reason) => out.push({ json: { ...base, type: 'reject', reason } });\n\n  const postText = txt(pr['Post text']).trim();\n  const platforms = ((pr['Platforms'] || {}).multi_select || []).map(o => o.name);\n  let publishAt = ((pr['Publish at'] || {}).date || {}).start || null;\n\n  // what is already scheduled, stored as \"X=abc; Bluesky=def\"\n  const done = {};\n  txt(pr['Publisher ID']).split(';').forEach(s => { const [k, v] = s.split('='); if (k && v) done[k.trim()] = v.trim(); });\n\n  if (!postText) { reject('The post text is empty.'); continue; }\n  if (!platforms.length) { reject(\"No platform is chosen under 'Platforms'.\"); continue; }\n  const unsupported = platforms.filter(p => !CHANNELS[p]);\n  if (unsupported.length) { reject('These platforms are not connected yet: ' + unsupported.join(', ') + '.'); continue; }\n  if (!publishAt) { reject(\"There is no 'Publish at' time.\"); continue; }\n  if (publishAt.length <= 10) { reject(\"'Publish at' needs a time as well as a date.\"); continue; }\n  if (!/(Z|[+-]\\d\\d:\\d\\d)$/.test(publishAt)) publishAt += (cfg.timezoneOffset || '+05:30');\n  const due = new Date(publishAt);\n  const len = [...postText].length;\n  const todo = platforms.filter(p => !done[p]);\n  if (todo.length && (isNaN(due) || due.getTime() < Date.now() + 60000)) { reject(\"The 'Publish at' time has passed or is less than a minute away. Pick a later time.\"); continue; }\n  const tooLong = platforms.filter(p => len > LIMITS[p]);\n  if (tooLong.length) { reject('The post has ' + len + ' characters, which is over the limit for ' + tooLong.map(p => p + ' (' + LIMITS[p] + ')').join(' and ') + '.'); continue; }\n  if (!approvers.length) { reject(\"Nobody is listed under 'Approved by'. Posts only go out with a named approver.\"); continue; }\n  if (allowed.length) {\n    const ok = approvers.some(a => allowed.includes(String(a.name || '').toLowerCase()) || allowed.includes(String((a.person || {}).email || '').toLowerCase()));\n    if (!ok) { reject(approverLabel + ' is not on the list of people who can approve posts.'); continue; }\n  }\n\n  if (!todo.length) { out.push({ json: { ...base, type: 'skip', done } }); continue; }\n  for (const p of todo) {\n    const query = 'mutation { createPost(input: { text: ' + JSON.stringify(postText) + ', channelId: \"' + CHANNELS[p] + '\", schedulingType: automatic, mode: customScheduled, dueAt: \"' + due.toISOString() + '\" }) { ... on PostActionSuccess { post { id status dueAt } } ... on MutationError { message } } }';\n    out.push({ json: { ...base, type: 'schedule', platform: p, dueAt: due.toISOString(), done, platforms, query } });\n  }\n}\nreturn out;\n"
+      },
+      "id": "551a84db-1538-4a23-a599-21f02e89bfab",
+      "name": "Check each post",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "69fd1250-37e2-4228-bc07-5c2a1e4b9b00",
+              "leftValue": "={{ $json.type }}",
+              "rightValue": "schedule",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "250fae57-c557-4c0c-b554-0b973601c7ea",
+      "name": "Only problems and duplicates",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        940,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "d37027d7-9d4a-43aa-8aac-b7c13753ac92",
+              "leftValue": "={{ $json.type }}",
+              "rightValue": "schedule",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "dd0d1316-ded1-4706-9121-dda98942ec75",
+      "name": "Only posts to schedule",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        940,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Hub 1 - turn rejected / duplicate posts into: Notion update + Slack alert + log row\nconst cfg = $('Config').first().json;\nconst rt = (s) => ({ rich_text: [{ text: { content: String(s).slice(0, 1900) } }] });\nconst logBody = (event, d, detail) => ({ parent: { database_id: cfg.logDbId }, properties: {\n  'Run': { title: [{ text: { content: d.runId + ' ' + event } }] }, 'System': rt('Publishing Hub'), 'Item': rt(d.title),\n  'Event': { select: { name: event } }, 'Detail': rt(detail), 'Model': rt('none (no AI step)'), 'Cost': { number: 0 }, 'Approver': rt(d.approver || '') } });\nconst A = [];\nfor (const it of $input.all()) {\n  const d = it.json;\n  if (d.type === 'reject') {\n    A.push({ json: { type: 'notion', pageId: d.pageId, body: { properties: { 'Status': { select: { name: 'In review' } }, 'Last error': rt('Not scheduled: ' + d.reason) } } } });\n    A.push({ json: { type: 'slack', webhook: cfg.slackWebhook, text: ':warning: *' + d.title + '* was not scheduled. ' + d.reason + ' I moved it back to \"In review\". Fix it and set it to Approved again.\\n<' + d.url + '|Open in Notion>' } });\n    A.push({ json: { type: 'log', body: logBody('rejected', d, d.reason) } });\n  } else if (d.type === 'skip') {\n    A.push({ json: { type: 'notion', pageId: d.pageId, body: { properties: { 'Status': { select: { name: 'Scheduled' } }, 'Last error': rt('Approved a second time. Ignored, because it is already scheduled.') } } } });\n    A.push({ json: { type: 'slack', webhook: cfg.slackWebhook, text: ':information_source: *' + d.title + '* was approved a second time, but it is already scheduled. I ignored it so it will not post twice.\\n<' + d.url + '|Open in Notion>' } });\n    A.push({ json: { type: 'log', body: logBody('skipped', d, 'Duplicate approval ignored. Already scheduled: ' + JSON.stringify(d.done)) } });\n  }\n}\nreturn A;\n"
+      },
+      "id": "71d9d176-99ae-4a79-b8d3-06c06f9eea86",
+      "name": "Reject actions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.buffer.com",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: $json.query }) }}",
+        "options": {}
+      },
+      "id": "67fb4566-d9c8-4301-8061-a013f715430c",
+      "name": "Schedule in Buffer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        340
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Hub 1 - read Buffer's answers and decide: Scheduled or Failed\nconst cfg = $('Config').first().json;\nconst rt = (s) => ({ rich_text: [{ text: { content: String(s).slice(0, 1900) } }] });\nconst logBody = (event, d, detail) => ({ parent: { database_id: cfg.logDbId }, properties: {\n  'Run': { title: [{ text: { content: d.runId + ' ' + event } }] }, 'System': rt('Publishing Hub'), 'Item': rt(d.title),\n  'Event': { select: { name: event } }, 'Detail': rt(detail), 'Model': rt('none (no AI step)'), 'Cost': { number: 0 }, 'Approver': rt(d.approver || '') } });\nconst plain = (m) => {\n  if (/401|unauthor|token|api key|authenticat/i.test(m)) return \"Buffer rejected our key. The key may have been replaced or revoked. Make a new key in Buffer and update it in n8n (Runbook, fix 1).\";\n  if (/limit|quota/i.test(m)) return 'Buffer says a queue or plan limit was reached. Wait for some posts to go out, or upgrade the plan. (Buffer said: ' + m + ')';\n  if (/disconnect|reconnect|expired/i.test(m)) return 'The channel looks disconnected in Buffer. Reconnect it in Buffer, then approve again. (Buffer said: ' + m + ')';\n  return 'Buffer said: ' + m;\n};\nconst asked = $('Check each post').all().map(i => i.json).filter(d => d.type === 'schedule');\nconst answers = $input.all().map(i => i.json);\nconst groups = {};\nasked.forEach((d, i) => {\n  const r = answers[i] || {};\n  const cp = r.data && r.data.createPost;\n  const id = cp && cp.post && cp.post.id;\n  const g = groups[d.pageId] = groups[d.pageId] || { d, ids: { ...d.done }, fails: [] };\n  if (id) g.ids[d.platform] = id;\n  else {\n    const e = r.error;\n    const msg = (cp && cp.message) || (r.errors && r.errors[0] && r.errors[0].message) || (e && (e.message || String(e))) || 'no answer from Buffer';\n    g.fails.push(d.platform + ': ' + plain(String(msg)));\n  }\n});\nconst A = [];\nfor (const g of Object.values(groups)) {\n  const d = g.d;\n  const serial = Object.entries(g.ids).map(([k, v]) => k + '=' + v).join('; ');\n  const idsProp = serial ? rt(serial) : { rich_text: [] };\n  if (!g.fails.length) {\n    A.push({ json: { type: 'notion', pageId: d.pageId, body: { properties: { 'Status': { select: { name: 'Scheduled' } }, 'Publisher ID': idsProp, 'Run key': rt(d.runId), 'Last error': { rich_text: [] } } } } });\n    A.push({ json: { type: 'log', body: logBody('scheduled', d, 'Scheduled for ' + d.dueAt + ' on ' + Object.keys(g.ids).join(' + ') + ' (' + serial + ')') } });\n  } else {\n    const okPlatforms = Object.keys(g.ids);\n    const text = g.fails.join(' | ') + (okPlatforms.length ? ' Already scheduled: ' + okPlatforms.join(', ') + '. Set the status to Approved again to retry only the missing ones.' : ' Fix the problem, then set the status to Approved again.');\n    A.push({ json: { type: 'notion', pageId: d.pageId, body: { properties: { 'Status': { select: { name: 'Failed' } }, 'Publisher ID': idsProp, 'Run key': rt(d.runId), 'Last error': rt('Could not schedule. ' + text) } } } });\n    A.push({ json: { type: 'slack', webhook: cfg.slackWebhook, text: ':rotating_light: *' + d.title + '* failed to schedule. ' + text + '\\n<' + d.url + '|Open in Notion>' } });\n    A.push({ json: { type: 'log', body: logBody('failed', d, text) } });\n  }\n}\nreturn A;\n"
+      },
+      "id": "f48f2801-b701-48d9-9637-6e58dd27ca48",
+      "name": "Schedule actions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1460,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b24a0ad5-0c74-498d-ad8e-3e4bdb8f31f3",
+              "leftValue": "={{ $json.type }}",
+              "rightValue": "notion",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "fc1d9177-1fa2-42d5-9c6a-1f2b028640d7",
+      "name": "Only Notion updates",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        1740,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "0ae8e311-e2fa-4e63-9fe3-1e708688fc86",
+              "leftValue": "={{ $json.type }}",
+              "rightValue": "slack",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c9ff314e-1599-400e-a551-50aaff46f8f4",
+      "name": "Only Slack alerts",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        1740,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "30f42f23-d181-410e-91a5-b33caa5940c8",
+              "leftValue": "={{ $json.type }}",
+              "rightValue": "log",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8812e276-4c92-49c9-8d12-96d26343d0f0",
+      "name": "Only log rows",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        1740,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.notion.com/v1/pages/{{ $json.pageId }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {}
+      },
+      "id": "e9d6295c-dbeb-4f7f-bc34-489851cfd760",
+      "name": "Update Notion row",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2000,
+        180
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.webhook }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {}
+      },
+      "id": "8fe7fb4c-7fae-4044-b296-d96242b45812",
+      "name": "Post to #alerts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2000,
+        340
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/pages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {}
+      },
+      "id": "09c6cf6a-1b10-4fba-9c2c-0a3c6f7e84eb",
+      "name": "Write run log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2000,
+        500
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "Every minute": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Find approved posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find approved posts": {
+      "main": [
+        [
+          {
+            "node": "Check each post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check each post": {
+      "main": [
+        [
+          {
+            "node": "Only problems and duplicates",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Only posts to schedule",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only problems and duplicates": {
+      "main": [
+        [
+          {
+            "node": "Reject actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only posts to schedule": {
+      "main": [
+        [
+          {
+            "node": "Schedule in Buffer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule in Buffer": {
+      "main": [
+        [
+          {
+            "node": "Schedule actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reject actions": {
+      "main": [
+        [
+          {
+            "node": "Only Notion updates",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Only Slack alerts",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Only log rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only Notion updates": {
+      "main": [
+        [
+          {
+            "node": "Update Notion row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only Slack alerts": {
+      "main": [
+        [
+          {
+            "node": "Post to #alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only log rows": {
+      "main": [
+        [
+          {
+            "node": "Write run log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule actions": {
+      "main": [
+        [
+          {
+            "node": "Only Notion updates",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Only Slack alerts",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Only log rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

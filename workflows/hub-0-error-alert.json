@@ -1,0 +1,86 @@
+{
+  "name": "Hub 0 - Error alert",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "d5a0aac3-8f37-49ac-97e7-a1917b6b3c1b",
+      "name": "On any workflow error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "6aa2674f-23a9-48b9-9f0e-ba6c53044ccc",
+              "name": "slackWebhook",
+              "value": "PASTE_SLACK_WEBHOOK_URL",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "f1ddaa7b-8031-4e93-bc99-8c411d74c45b",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.slackWebhook }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: ':rotating_light: The Publishing Hub automation stopped with an error. Workflow: ' + $json.workflow.name + '. Step: ' + $json.execution.lastNodeExecuted + '. Message: ' + $json.execution.error.message + '. What to do: open the Runbook page in Notion and follow the matching fix. Run: ' + $json.execution.url }) }}",
+        "options": {}
+      },
+      "id": "26b79834-2076-455d-ac29-3a55203687b0",
+      "name": "Post crash to #alerts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "On any workflow error": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Post crash to #alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

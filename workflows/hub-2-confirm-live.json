@@ -1,0 +1,468 @@
+{
+  "name": "Hub 2 - Confirm posts went live",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "656aede0-1ecc-4686-88c2-4fe281d08519",
+      "name": "Every 5 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "4d12f534-587b-4b2b-9b1d-9f88b19ca4b8",
+              "name": "contentDbId",
+              "value": "PASTE_CONTENT_DATABASE_ID",
+              "type": "string"
+            },
+            {
+              "id": "441518a8-60d2-44a7-ab54-2bab8252b09f",
+              "name": "logDbId",
+              "value": "PASTE_RUN_LOG_DATABASE_ID",
+              "type": "string"
+            },
+            {
+              "id": "95a09a2d-4014-4647-a098-4cdb990936bd",
+              "name": "slackWebhook",
+              "value": "PASTE_SLACK_WEBHOOK_URL",
+              "type": "string"
+            },
+            {
+              "id": "a92a93a9-4f35-4334-96c6-23aab5cf27bb",
+              "name": "bufferOrgId",
+              "value": "6b03ef2b66a95b31f0fb3b4c",
+              "type": "string"
+            },
+            {
+              "id": "3bf51d80-366d-4abc-85f4-e979637393b0",
+              "name": "xChannelId",
+              "value": "6b03efb88541f09ecb729f59",
+              "type": "string"
+            },
+            {
+              "id": "006b754d-a83a-4a59-b88f-d1dacd96844d",
+              "name": "blueskyChannelId",
+              "value": "6b03ef848541f09ecb729e25",
+              "type": "string"
+            },
+            {
+              "id": "86d656da-d615-4974-b751-f8cc44da8357",
+              "name": "allowedApprovers",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "a4f358f4-0214-40f4-a67e-901cc9c94b35",
+              "name": "timezoneOffset",
+              "value": "+05:30",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "76de6839-1d8e-459e-8263-eede93ac06cf",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.notion.com/v1/databases/{{ $('Config').first().json.contentDbId }}/query",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filter: { and: [ { property: 'Status', select: { equals: 'Scheduled' } }, { property: 'Publish at', date: { on_or_before: new Date().toISOString() } } ] }, page_size: 20 }) }}",
+        "options": {}
+      },
+      "id": "f4d5942c-64a4-48fd-acba-b29575f9664e",
+      "name": "Find due scheduled posts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Hub 2 - ask Buffer which posts have actually been sent (one call covers every post)\nconst cfg = $('Config').first().json;\nconst pages = ($input.first().json.results) || [];\nif (!pages.length) return [];\nconst query = 'query { posts(first: 50, input: { organizationId: \"' + cfg.bufferOrgId + '\", filter: { status: [sent], channelIds: [\"' + cfg.xChannelId + '\", \"' + cfg.blueskyChannelId + '\"] }, sort: [{ field: dueAt, direction: desc }] }) { edges { node { id channelId dueAt externalLink } } } }';\nreturn [{ json: { query } }];\n"
+      },
+      "id": "01874757-01ee-4473-967d-adf8bb2440b8",
+      "name": "Ask Buffer what was sent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.buffer.com",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: $json.query }) }}",
+        "options": {}
+      },
+      "id": "e1dbb0db-a4bd-4c4d-9aee-18211ecf440a",
+      "name": "Get sent posts from Buffer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        920,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Hub 2 - mark posts Live once Buffer shows them as sent; alert if one is 15+ minutes late\nconst cfg = $('Config').first().json;\nconst rt = (s) => ({ rich_text: [{ text: { content: String(s).slice(0, 1900) } }] });\nconst txt = (p) => ((p && (p.rich_text || p.title)) || []).map(t => t.plain_text).join('');\nconst runId = 'run-' + $execution.id;\nconst reply = $input.first().json;\nconst posts = reply.data && reply.data.posts;\nif (!posts) throw new Error(\"Buffer did not return the list of sent posts. Detail: \" + JSON.stringify(reply.errors || reply.error || reply).slice(0, 300));\nconst sentIds = new Set((posts.edges || []).map(e => e.node.id));\nconst links = {};\n(posts.edges || []).forEach(e => { links[e.node.id] = e.node.externalLink; });\nconst pages = $('Find due scheduled posts').first().json.results || [];\nconst logBody = (event, d, detail) => ({ parent: { database_id: cfg.logDbId }, properties: {\n  'Run': { title: [{ text: { content: runId + ' ' + event } }] }, 'System': rt('Publishing Hub'), 'Item': rt(d.title),\n  'Event': { select: { name: event } }, 'Detail': rt(detail), 'Model': rt('none (no AI step)'), 'Cost': { number: 0 }, 'Approver': rt(d.approver || '') } });\nconst A = [];\nfor (const page of pages) {\n  const pr = page.properties || {};\n  const platforms = ((pr['Platforms'] || {}).multi_select || []).map(o => o.name);\n  const map = {};\n  txt(pr['Publisher ID']).split(';').forEach(s => { const [k, v] = s.split('='); if (k && v) map[k.trim()] = v.trim(); });\n  let at = ((pr['Publish at'] || {}).date || {}).start || '';\n  if (at && !/(Z|[+-]\\d\\d:\\d\\d)$/.test(at)) at += (cfg.timezoneOffset || '+05:30');\n  const d = { title: txt(pr['Title']) || '(untitled)', approver: ((pr['Approved by'] || {}).people || []).map(a => a.name || '').join(', ') };\n  const allSent = platforms.length > 0 && platforms.every(p => map[p] && sentIds.has(map[p]));\n  const lateMin = (Date.now() - new Date(at).getTime()) / 60000;\n  if (allSent) {\n    const urls = platforms.map(p => links[map[p]]).filter(Boolean);\n    const props = { 'Status': { select: { name: 'Live' } }, 'Last error': { rich_text: [] } };\n    if (urls.length) props['Post URL'] = { url: urls[0] };\n    A.push({ json: { type: 'notion', pageId: page.id, body: { properties: props } } });\n    A.push({ json: { type: 'log', body: logBody('published', d, 'Buffer shows it as sent on ' + platforms.join(' + ') + (urls.length ? '. Links: ' + urls.join(' , ') : '')) } });\n  } else if (lateMin > 15) {\n    const text = 'It was due ' + Math.round(lateMin) + ' minutes ago but Buffer does not show it as sent. Check the channel in Buffer (it may be disconnected), then re-approve.';\n    A.push({ json: { type: 'notion', pageId: page.id, body: { properties: { 'Status': { select: { name: 'Failed' } }, 'Last error': rt(text) } } } });\n    A.push({ json: { type: 'slack', webhook: cfg.slackWebhook, text: ':rotating_light: *' + d.title + '* may not have gone out. ' + text + '\\n<' + page.url + '|Open in Notion>' } });\n    A.push({ json: { type: 'log', body: logBody('failed', d, text) } });\n  }\n}\nreturn A;\n"
+      },
+      "id": "d6747db2-f2db-483f-89b5-227758e30caf",
+      "name": "Live or late actions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1160,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "2c551864-b8e5-41ef-9598-83a07420ff60",
+              "leftValue": "={{ $json.type }}",
+              "rightValue": "notion",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5c2f3df4-8169-481d-af4c-78481d5ade18",
+      "name": "Only Notion updates",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        1420,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e8eb3e1d-d573-4e11-96ee-1d334375eba8",
+              "leftValue": "={{ $json.type }}",
+              "rightValue": "slack",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7d72999d-74a1-4aae-b5f5-47d4ad789c95",
+      "name": "Only Slack alerts",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        1420,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "db796680-e38c-4e50-a7b6-fe37db5bfc68",
+              "leftValue": "={{ $json.type }}",
+              "rightValue": "log",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4571b8e1-ee74-437e-8684-2b584d0d535d",
+      "name": "Only log rows",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        1420,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.notion.com/v1/pages/{{ $json.pageId }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {}
+      },
+      "id": "509a318d-97a4-454a-aba8-8bb217a92cea",
+      "name": "Update Notion row",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        60
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.webhook }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {}
+      },
+      "id": "8eeb9080-3c00-49ed-9234-1b9e203f1d13",
+      "name": "Post to #alerts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        220
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/pages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {}
+      },
+      "id": "f9d33965-86c9-4411-9073-73db148c48eb",
+      "name": "Write run log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        380
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "Every 5 minutes": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Find due scheduled posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find due scheduled posts": {
+      "main": [
+        [
+          {
+            "node": "Ask Buffer what was sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask Buffer what was sent": {
+      "main": [
+        [
+          {
+            "node": "Get sent posts from Buffer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get sent posts from Buffer": {
+      "main": [
+        [
+          {
+            "node": "Live or late actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Live or late actions": {
+      "main": [
+        [
+          {
+            "node": "Only Notion updates",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Only Slack alerts",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Only log rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only Notion updates": {
+      "main": [
+        [
+          {
+            "node": "Update Notion row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only Slack alerts": {
+      "main": [
+        [
+          {
+            "node": "Post to #alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only log rows": {
+      "main": [
+        [
+          {
+            "node": "Write run log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
